@@ -1,46 +1,58 @@
-# service.py
 from fastapi import FastAPI, File, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from PIL import Image
-import io, torch
+from typing import Dict
+import io, os, torch
 from transformers import AutoImageProcessor, SiglipForImageClassification
 
-# === Load model 1 lần khi khởi động ===
-MODEL_NAME = "strangerguardhf/nsfw_image_detection"
-model = SiglipForImageClassification.from_pretrained(MODEL_NAME)
-processor = AutoImageProcessor.from_pretrained(MODEL_NAME)
+MODEL_NAME = os.getenv("MODEL_NAME", "strangerguardhf/nsfw_image_detection")
 
-id2label = {
-    "0": "Anime Picture",
-    "1": "Hentai",
-    "2": "Normal",
-    "3": "Pornography",
-    "4": "Enticing or Sensual"
-}
+app = FastAPI(title="NSFW Image Detection API")
+app.add_middleware(
+    CORSMiddleware, allow_origins=["*"], allow_credentials=False,
+    allow_methods=["*"], allow_headers=["*"],
+)
 
-LABELS = [id2label[str(i)] for i in range(len(id2label))]
+model = None
+processor = None
+labels = None
 
-app = FastAPI(title="nsfw-image-detection", version="1.0.0")
+def load_model():
+    global model, processor, labels
+    if model is not None:
+        return
+    processor = AutoImageProcessor.from_pretrained(MODEL_NAME)
+    model = SiglipForImageClassification.from_pretrained(MODEL_NAME)
+    id2label = getattr(model.config, "id2label", None)
+    labels[:] = [] if labels else None
+    if id2label:
+        labels = [id2label[str(i)] for i in sorted(map(int, id2label.keys()))]
+    else:
+        labels = [f"class_{i}" for i in range(model.config.num_labels)]
+
+@app.on_event("startup")
+def _startup():
+    load_model()
 
 @app.get("/health")
 def health():
     return {"ok": True}
 
-def classify(image_bytes: bytes):
+@app.get("/")
+def root():
+    return {"ok": True, "model": MODEL_NAME, "labels": labels}
+
+def classify_bytes(image_bytes: bytes) -> Dict:
     image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
     inputs = processor(images=image, return_tensors="pt")
     with torch.no_grad():
         logits = model(**inputs).logits
         probs = torch.nn.functional.softmax(logits, dim=1).squeeze().tolist()
 
-    scores = {LABELS[i]: round(float(probs[i]), 4) for i in range(len(LABELS))}
-    # Chính sách ví dụ (tuỳ chỉnh theo nhu cầu)
-    is_nsfw = (
-        scores.get("Pornography", 0) >= 0.50 or
-        scores.get("Hentai", 0)      >= 0.50 or
-        scores.get("Enticing or Sensual", 0) >= 0.70
-    )
-    # gợi ý nhãn cao nhất
+    scores = {labels[i]: float(probs[i]) for i in range(len(labels))}
+    nsfw_keys = {"Pornography", "Hentai", "Explicit Nudity", "Sexy or Nude", "Enticing or Sensual"}
+    is_nsfw = any(scores.get(k, 0.0) >= 0.70 for k in nsfw_keys)
     top_label = max(scores, key=scores.get)
     return {"scores": scores, "top_label": top_label, "is_nsfw": is_nsfw}
 
@@ -48,7 +60,11 @@ def classify(image_bytes: bytes):
 async def analyze(image: UploadFile = File(...)):
     data = await image.read()
     try:
-        result = classify(data)
+        result = classify_bytes(data)
         return JSONResponse({"ok": True, **result})
     except Exception as e:
         return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("service:app", host="0.0.0.0", port=int(os.getenv("PORT", "8000")))

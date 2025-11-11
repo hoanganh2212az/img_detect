@@ -1,7 +1,6 @@
-transformers
-torch
-pillow
-gradio
-hf_xet #It's not effective ; it even been removed.
-fastapi
-uvicorn[standard]
+fastapi==0.115.2
+uvicorn[standard]==0.31.1
+pillow==10.4.0
+transformers==4.44.2
+# CPU-only PyTorch wheel (nhỏ, deploy-friendly)
+torch==2.2.2+cpu --extra-index-url https://download.pytorch.org/whl/cpu
